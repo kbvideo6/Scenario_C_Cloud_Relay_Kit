@@ -47,6 +47,14 @@ const tcp_server = net.createServer((socket) => {
   socket.on('data', (data) => {
     try {
       const raw_str = data.toString('utf8').trim();
+      
+      // Ignore Render's HTTP health checks to stop log spam
+      if (raw_str.startsWith('GET /') || raw_str.startsWith('HEAD /')) {
+        socket.write('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK');
+        socket.end();
+        return;
+      }
+
       console.log(`Received raw data from DTU: ${raw_str}`);
 
       // Extract JSON part from proprietary wrapped string
