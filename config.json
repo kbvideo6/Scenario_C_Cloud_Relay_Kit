@@ -3,7 +3,14 @@
   "username": "lakeledger_sensor",
   "password": "KAPk1TOX4dU1U0iCDaNvkg==",
   "publish_topic": "lake/c943df22-02a8-4901-9367-d8f0fea7e9f0/sensor/bench-001/data",
+  "lake_id": "c943df22-02a8-4901-9367-d8f0fea7e9f0",
+  "sensor_id": "bench-001",
   "local_http_port": 3000,
   "debug_logging": true,
-  "forward_all_raw_data": true
+  "forward_all_raw_data": true,
+  "developer_tcp_bridge": {
+    "enabled": true,
+    "host": "134.122.14.249",
+    "port": 8884
+  }
 }
