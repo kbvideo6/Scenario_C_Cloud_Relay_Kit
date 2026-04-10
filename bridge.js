@@ -1,0 +1,106 @@
+const mqtt_library = require('mqtt');
+const file_reader = require('fs');
+const path_tool = require('path');
+
+const setup_file_location = path_tool.join(process.cwd(), 'config.json');
+let active_network_settings;
+try {
+  active_network_settings = JSON.parse(file_reader.readFileSync(setup_file_location, 'utf8'));
+} catch (failure_reason) {
+  console.error("Failed to read config.json", failure_reason);
+  process.exit(1);
+}
+
+// 1. Setup Forwarding Agent (To LakeLedger)
+const connection_rules = {
+  username: active_network_settings.username,
+  password: active_network_settings.password,
+  rejectUnauthorized: true,
+  clientId: 'lakeledger-bridge-pub-' + Math.random().toString(16).slice(2, 8),
+  clean: true,
+  reconnectPeriod: 5000,
+};
+
+const custom_security_certificate = path_tool.join(process.cwd(), '..', '2_TLS_Certificate', 'lakeledger-ca.crt');
+if (file_reader.existsSync(custom_security_certificate)) {
+  connection_rules.ca = file_reader.readFileSync(custom_security_certificate);
+} 
+
+const bridge_client = mqtt_library.connect(active_network_settings.remote_broker || "mqtts://mqtt.getlakeledger.com:8883", connection_rules);
+
+bridge_client.on('connect', () => {
+  console.log(`Bridge is securely connected to the main LakeLedger broker!`);
+});
+
+bridge_client.on('error', (failure_reason) => {
+  console.error('Connection issue found with LakeLedger: ', failure_reason.message);
+});
+
+const net = require('net');
+
+// 2. Setup Local Receiving Agent (Custom Raw TCP Gateway)
+const open_port = active_network_settings.local_http_port || 3000;
+
+const tcp_server = net.createServer((socket) => {
+  console.log(`DTU Connected from ${socket.remoteAddress}:${socket.remotePort}`);
+
+  socket.on('data', (data) => {
+    try {
+      const raw_str = data.toString('utf8').trim();
+      console.log(`Received raw data from DTU: ${raw_str}`);
+
+      // Extract JSON part from proprietary wrapped string
+      // e.g. "PUB lake/.../data {"sensorDatas":[{"value":0.165}]}"
+      const start_idx = raw_str.indexOf('{');
+      if (start_idx !== -1) {
+        let json_str = raw_str.substring(start_idx);
+        let converted_packet;
+        
+        try {
+          converted_packet = JSON.parse(json_str);
+        } catch (e) {
+          console.log("Parsing generic JSON. Forwarding raw json payload.");
+          bridge_client.publish(active_network_settings.publish_topic, json_str, { qos: 1 });
+          return;
+        }
+
+        const sensor_values_list = converted_packet.sensorDatas || converted_packet.sensorData || [];
+        let final_JSON_string;
+
+        // Structured wrapper format handler
+        if (sensor_values_list.length >= 1) {
+          const clean_river_readings = {
+            dissolved_oxygen: parseFloat(sensor_values_list[0].value || 0),
+            water_temp: sensor_values_list.length > 1 ? parseFloat(sensor_values_list[1].value || 0) : 0.0
+          };
+          final_JSON_string = JSON.stringify(clean_river_readings);
+        } else {
+          final_JSON_string = JSON.stringify(converted_packet);
+        }
+
+        bridge_client.publish(active_network_settings.publish_topic, final_JSON_string, { qos: 1 }, (failure_reason) => {
+          if (failure_reason) {
+            console.error('Publish drop', failure_reason);
+          } else {
+            console.log(`Forwarded safely to LakeLedger -> `, final_JSON_string);
+          }
+        });
+      }
+    } catch (failure_reason) {
+      console.error('Failed processing packet', failure_reason);
+    }
+  });
+
+  socket.on('end', () => {
+    console.log('DTU disconnected');
+  });
+
+  socket.on('error', (err) => {
+    console.error('Socket error: ', err.message);
+  });
+});
+
+tcp_server.listen(open_port, '0.0.0.0', () => {
+  console.log(`Cloud DTU TCP Gateway running on Port ${open_port}. Waiting for DTU to connect...`);
+});
+

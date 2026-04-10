@@ -1,0 +1,7 @@
+{
+  "remote_broker": "mqtts://mqtt.getlakeledger.com:8883",
+  "username": "lakeledger_sensor",
+  "password": "KAPk1TOX4dU1U0iCDaNvkg==",
+  "publish_topic": "lake/c943df22-02a8-4901-9367-d8f0fea7e9f0/sensor/bench-001/data",
+  "local_http_port": 3000
+}

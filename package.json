@@ -1,0 +1,13 @@
+{
+  "name": "dtu-mqtt-tls-bridge",
+  "version": "1.0.0",
+  "description": "Bridge for ZY-401-601 DTU payload transformation and TLS forwarding",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mqtt": "^5.0.0"
+  }
+}
