@@ -1,6 +1,6 @@
 # Scenario C: Cloud Relay Deployment Guide (Oracle Cloud)
 
-Because the DTU device relies on a **Raw TCP Socket** instead of standard HTTP web traffic, standard web hosting providers (like Render or Vercel) will bounce the connection. We must use a full virtual machine. 
+Because the DTU device relies on a **Raw TCP Socket** instead of standard HTTP web traffic, standard web hosting providers (like Render or Vercel) will bounce the connection. We must use a full virtual machine.
 
 This guide covers creating an **Always Free Oracle Cloud** server to act as a permanent, public bridge from your DTU to LakeLedger. Oracle has the most generous free tier, providing up to 4 ARM-based servers permanently for free.
 
@@ -8,7 +8,7 @@ This guide covers creating an **Always Free Oracle Cloud** server to act as a pe
 1. **Create an account** at [cloud.oracle.com](https://cloud.oracle.com/) (Requires a credit card for verification, but you will not be charged for Always Free resources).
 2. Once logged in, click **Create a VM instance**.
 3. **Name it:** `dtu-bridge-vm`.
-4. **Image and Shape:** 
+4. **Image and Shape:**
    - Ensure the image is **Canonical Ubuntu** (e.g., 22.04).
    - Ensure the shape says **Always Free Eligible** (either `VM.Standard.E2.1.Micro` or `VM.Standard.A1.Flex` ARM processor).
 5. **Networking:** In the Primary VNIC section, ensure "Assign a public IPv4 address" is checked.
@@ -31,7 +31,7 @@ Open your computer's terminal (Command Prompt, PowerShell, or Mac Terminal) and 
 
 ```bash
 # Example syntax (note: the default user is 'ubuntu')
-ssh -i "C:\path\to\your\ssh-key-2023-xx-xx.key" ubuntu@YOUR_ORACLE_PUBLIC_IP
+ssh -i "C:\Users\artst\Downloads\ssh-key-2026-04-10.key" ubuntu@150.136.62.31
 ```
 
 ### 4. Open the Internal Linux Firewall
@@ -74,11 +74,34 @@ pm2 startup
 ```
 
 ### 7. Update your DTU Settings
-Your bridge is now live on the internet! 
+Your bridge is now live on the internet!
 
 1. Copy the **Public IP Address** of your Oracle VM.
 2. In your physical DTU interface, configure it to send data to a Custom Server.
-3. **Target IP:** `<YOUR_ORACLE_PUBLIC_IP>` 
+3. **Target IP:** `<YOUR_ORACLE_PUBLIC_IP>`
 4. **Target Port:** `3000`
 
 The DTU will connect directly to your Oracle Virtual Machine, and `bridge.js` will securely process the raw TCP packets and pump them straight to LakeLedger.
+
+### 8. Troubleshooting & Common Diagnostics
+
+**1. No Public IP Address / "Ephemeral Public IP" is Grayed Out**
+*   **Symptom:** You created the instance but the Public IP simply says `-`.
+*   **Fix:** In the Oracle Console, click the **Networking** tab -> **Attached VNICs** -> Click your VNIC name -> Click **IPv4 Addresses** -> Click the `...` menu under your Private IP -> **Edit** -> Select **Ephemeral Public IP** and click **Update**.
+*   *Note:* If Ephemeral IP is grayed out, the instance was accidentally created in a "Private Network". You must Terminate it and recreate it, cautiously ensuring "Assign a public IPv4 address" is checked under Networking options.
+
+**2. Node.js Setup / Package Installation Hangs at 98%**
+*   **Symptom:** The terminal freezes on `Progress: [ 98%] [###...]` during the Node.js installation.
+*   **Fix:** Ubuntu occasionally initiates a hidden background configuration dialog asking if it should restart services. Click inside your terminal and press the **`Enter`** key a few times. This accepts the default hidden choice and instantly unfreezes the installation.
+
+**3. Terminal Prompt changed to `root@...`**
+*   **Symptom:** A command didn't pipe properly and you dropped into a root shell. Your prompt says `root@dtu-bridge-vm:~#` instead of `ubuntu@...`. Running standard `npm` or `git` commands as root can create locked, uneditable files.
+*   **Fix:** If you are unexpectedly in the root user, type `exit` and press Enter to drop back down to the standard `ubuntu` user before proceeding with the git clone and installation.
+
+**4. GitHub Password Authentication Failed (`git clone`)**
+*   **Symptom:** GitHub asks for your username and password, but entering your account password returns `remote: Password authentication is not supported for Git operations`.
+*   **Fix:** GitHub removed terminal password support. When it asks for your password, you must paste a **Personal Access Token (PAT)** generated from your GitHub account's Developer Settings. 
+
+**5. `pm2 startup` Does Not Automatically Save**
+*   **Symptom:** You ran `pm2 startup` but the server didn't auto-boot the bridge when restarting.
+*   **Fix:** Running `pm2 startup` does not activate the service immediately. It *generates a long command* explicitly targeted for your operating system (starting with `sudo env PATH=$PATH:/usr/bin...`). You must **copy that outputted line and paste it back into your terminal** and press Enter one last time to finalize the auto-start script.

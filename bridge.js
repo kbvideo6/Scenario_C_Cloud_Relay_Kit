@@ -42,6 +42,10 @@ const net = require('net');
 const open_port = active_network_settings.local_http_port || 3000;
 
 const tcp_server = net.createServer((socket) => {
+  if (active_network_settings.debug_logging) {
+    console.log(`[DEBUG] New connection established from [${socket.remoteAddress}]`);
+  }
+
   let has_received_data = false;
 
   socket.on('data', (data) => {
@@ -56,7 +60,11 @@ const tcp_server = net.createServer((socket) => {
         return;
       }
 
-      console.log(`[${socket.remoteAddress}] Received data: ${raw_str}`);
+      if (active_network_settings.debug_logging) {
+        console.log(`[DEBUG] [${socket.remoteAddress}] Received raw packet: ${raw_str}`);
+      } else {
+        console.log(`[${socket.remoteAddress}] Received data: ${raw_str}`);
+      }
 
       // Extract JSON part from proprietary wrapped string
       // e.g. "PUB lake/.../data {"sensorDatas":[{"value":0.165}]}"
@@ -68,7 +76,7 @@ const tcp_server = net.createServer((socket) => {
         try {
           converted_packet = JSON.parse(json_str);
         } catch (e) {
-          console.log("Parsing generic JSON. Forwarding raw json payload.");
+          if (active_network_settings.debug_logging) console.log(`[DEBUG] Parsing JSON failed. Forwarding raw json payload string.`);
           bridge_client.publish(active_network_settings.publish_topic, json_str, { qos: 1 });
           return;
         }
@@ -89,20 +97,37 @@ const tcp_server = net.createServer((socket) => {
 
         bridge_client.publish(active_network_settings.publish_topic, final_JSON_string, { qos: 1 }, (failure_reason) => {
           if (failure_reason) {
-            console.error('Publish drop', failure_reason);
+            console.error('[ERROR] Publish drop', failure_reason);
           } else {
-            console.log(`Forwarded safely to LakeLedger -> `, final_JSON_string);
+            console.log(`[SUCCESS] Forwarded formatted JSON safely to LakeLedger -> `, final_JSON_string);
           }
         });
+      } else {
+        // No JSON found handler
+        if (active_network_settings.forward_all_raw_data) {
+          if (active_network_settings.debug_logging) console.log(`[DEBUG] No JSON found in packet. "forward_all_raw_data" is enabled, forwarding raw payload to MQTT.`);
+          
+          if (raw_str.length > 0) {
+            bridge_client.publish(active_network_settings.publish_topic, raw_str, { qos: 1 }, (failure_reason) => {
+              if (failure_reason) {
+                console.error('[ERROR] Publish drop on raw data', failure_reason);
+              } else {
+                console.log(`[SUCCESS] Forwarded raw packet safely to LakeLedger -> `, raw_str);
+              }
+            });
+          }
+        } else {
+          if (active_network_settings.debug_logging) console.log(`[DEBUG] packet ignored (no JSON '{' found and 'forward_all_raw_data' is false)`);
+        }
       }
     } catch (failure_reason) {
-      console.error('Failed processing packet', failure_reason);
+      console.error('[CRITICAL] Failed processing packet', failure_reason);
     }
   });
 
   socket.on('end', () => {
-    // Only log disconnect if we actually exchanged data, to ignore health checks
-    if (has_received_data) {
+    // Only log disconnect if we actually exchanged data or in debug mode
+    if (has_received_data || active_network_settings.debug_logging) {
       console.log(`[${socket.remoteAddress}] disconnected`);
     }
   });
