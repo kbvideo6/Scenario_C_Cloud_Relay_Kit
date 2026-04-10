@@ -7,7 +7,7 @@
   "sensor_id": "bench-001",
   "local_http_port": 3000,
   "debug_logging": true,
-  "forward_all_raw_data": true,
+  "forward_all_raw_data": false,
   "developer_tcp_bridge": {
     "enabled": true,
     "host": "134.122.14.249",

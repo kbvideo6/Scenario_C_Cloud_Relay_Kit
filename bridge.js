@@ -78,10 +78,12 @@ const tcp_server = net.createServer((socket) => {
       has_data = true;
       const raw_str = data.toString('utf8').trim();
 
-      // Ignore HTTP health probes
-      if (raw_str.startsWith('GET /') || raw_str.startsWith('HEAD /')) {
-        socket.write('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK');
-        socket.end();
+      // Block ALL HTTP traffic and attack probes — DTU never sends HTTP
+      const HTTP_VERBS = ['GET ', 'POST ', 'PUT ', 'DELETE ', 'HEAD ', 'OPTIONS ', 'PATCH '];
+      const is_http = HTTP_VERBS.some(v => raw_str.startsWith(v));
+      if (is_http || raw_str.includes('HTTP/') || raw_str.includes('jsonrpc') || raw_str.includes('winnt')) {
+        dbg(`[SECURITY] Blocked HTTP/attack probe from [${socket.remoteAddress}]: ${raw_str.substring(0, 60)}...`);
+        socket.destroy(); // Don't even respond — starve the scanner
         return;
       }
 
