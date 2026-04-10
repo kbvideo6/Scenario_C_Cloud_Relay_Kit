@@ -61,7 +61,8 @@ const tcp_server = net.createServer((socket) => {
       }
 
       if (active_network_settings.debug_logging) {
-        console.log(`[DEBUG] [${socket.remoteAddress}] Received raw packet: ${raw_str}`);
+        console.log(`[DEBUG] [${socket.remoteAddress}] Received raw string: ${raw_str}`);
+        console.log(`[DEBUG] [${socket.remoteAddress}] Raw HEX Data Pack: ${data.toString('hex')}`);
       } else {
         console.log(`[${socket.remoteAddress}] Received data: ${raw_str}`);
       }
