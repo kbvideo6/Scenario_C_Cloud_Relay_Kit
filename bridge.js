@@ -87,13 +87,10 @@ const tcp_server = net.createServer((socket) => {
         return;
       }
 
-      // ── Log everything in debug mode ──
-      if (DEBUG) {
-        log('DEBUG', `[${socket.remoteAddress}] Raw string : ${raw_str}`);
-        log('DEBUG', `[${socket.remoteAddress}] HEX packet : ${data.toString('hex')}`);
-      } else {
-        log('DATA', `[${socket.remoteAddress}] ${raw_str}`);
-      }
+      // ── ALWAYS log every packet's content ──
+      log('DATA', `[${socket.remoteAddress}] Raw string : ${raw_str}`);
+      log('DATA', `[${socket.remoteAddress}] HEX packet : ${data.toString('hex')}`);
+      log('DATA', `[${socket.remoteAddress}] Byte count : ${data.length}`);
 
       // ── Try to extract JSON ──
       const json_start = raw_str.indexOf('{');
@@ -104,7 +101,8 @@ const tcp_server = net.createServer((socket) => {
         try {
           parsed = JSON.parse(json_str);
         } catch (e) {
-          dbg('JSON parse failed — forwarding raw JSON string as-is to MQTT.');
+          log('WARN', `JSON parse failed — forwarding raw JSON string as-is to MQTT.`);
+          log('DATA', `[PAYLOAD TO MQTT] ${json_str}`);
           publish_mqtt(json_str);
           return;
         }
@@ -124,21 +122,23 @@ const tcp_server = net.createServer((socket) => {
           mqtt_payload = JSON.stringify(parsed);
         }
 
-        // Forward to both destinations
+        // Forward to both destinations — show payload on terminal
+        log('DATA', `[PARSED] DO=${do_val} | Temp=${temp_val} | Sat=${sat_val}`);
+        log('DATA', `[PAYLOAD TO MQTT] ${mqtt_payload}`);
         publish_mqtt(mqtt_payload);
         forward_csv_to_dev_bridge(do_val, temp_val, sat_val);
 
       } else {
         // No JSON — handle raw/heartbeat packets
+        log('DATA', `[NO JSON] Raw packet content: "${raw_str}"`);
         if (cfg.forward_all_raw_data && raw_str.length > 0) {
-          dbg(`No JSON found — "forward_all_raw_data" enabled. Forwarding raw to MQTT.`);
+          log('DATA', `[FORWARDING RAW] Sending raw payload to MQTT and Dev Bridge`);
           publish_mqtt(raw_str);
-          // Also forward raw string as the DO field in CSV for visibility
           if (dev_tcp_cfg && dev_tcp_cfg.enabled) {
             forward_csv_to_dev_bridge(raw_str, '', '');
           }
         } else {
-          dbg(`Packet ignored (no JSON found, "forward_all_raw_data" is false).`);
+          log('DATA', `[NOT FORWARDED] forward_all_raw_data is false — packet logged but not sent`);
         }
       }
 
