@@ -42,10 +42,11 @@ const net = require('net');
 const open_port = active_network_settings.local_http_port || 3000;
 
 const tcp_server = net.createServer((socket) => {
-  console.log(`DTU Connected from ${socket.remoteAddress}:${socket.remotePort}`);
+  let has_received_data = false;
 
   socket.on('data', (data) => {
     try {
+      has_received_data = true;
       const raw_str = data.toString('utf8').trim();
       
       // Ignore Render's HTTP health checks to stop log spam
@@ -55,7 +56,7 @@ const tcp_server = net.createServer((socket) => {
         return;
       }
 
-      console.log(`Received raw data from DTU: ${raw_str}`);
+      console.log(`[${socket.remoteAddress}] Received data: ${raw_str}`);
 
       // Extract JSON part from proprietary wrapped string
       // e.g. "PUB lake/.../data {"sensorDatas":[{"value":0.165}]}"
@@ -100,11 +101,17 @@ const tcp_server = net.createServer((socket) => {
   });
 
   socket.on('end', () => {
-    console.log('DTU disconnected');
+    // Only log disconnect if we actually exchanged data, to ignore health checks
+    if (has_received_data) {
+      console.log(`[${socket.remoteAddress}] disconnected`);
+    }
   });
 
   socket.on('error', (err) => {
-    console.error('Socket error: ', err.message);
+    // Suppress simple connection reset errors from health checkers
+    if (err.code !== 'ECONNRESET') {
+      console.error('Socket error: ', err.message);
+    }
   });
 });
 
