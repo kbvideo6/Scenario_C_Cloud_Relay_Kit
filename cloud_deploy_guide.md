@@ -33,6 +33,8 @@ Open your computer's terminal (Command Prompt, PowerShell, or Mac Terminal) and 
 # Example syntax (note: the default user is 'ubuntu')
 ssh -i "C:\Users\artst\Downloads\ssh-key-2026-04-10.key" ubuntu@150.136.62.31
 ```
+scp ubuntu@150.136.62.31:/home/ubuntu/Scenario_C_Cloud_Relay_Kit/logs/bridge_log_2026-04-11T07-07-57.txt .
+
 
 ### 4. Open the Internal Linux Firewall
 Oracle Cloud images have a strict internal Linux firewall *in addition* to the cloud firewall. Run this inside the terminal to open port 3000 on the VM itself:
@@ -100,7 +102,7 @@ The DTU will connect directly to your Oracle Virtual Machine, and `bridge.js` wi
 
 **4. GitHub Password Authentication Failed (`git clone`)**
 *   **Symptom:** GitHub asks for your username and password, but entering your account password returns `remote: Password authentication is not supported for Git operations`.
-*   **Fix:** GitHub removed terminal password support. When it asks for your password, you must paste a **Personal Access Token (PAT)** generated from your GitHub account's Developer Settings. 
+*   **Fix:** GitHub removed terminal password support. When it asks for your password, you must paste a **Personal Access Token (PAT)** generated from your GitHub account's Developer Settings.
 
 **5. `pm2 startup` Does Not Automatically Save**
 *   **Symptom:** You ran `pm2 startup` but the server didn't auto-boot the bridge when restarting.
