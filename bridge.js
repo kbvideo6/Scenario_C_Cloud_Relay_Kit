@@ -1,7 +1,7 @@
 const mqtt_library = require('mqtt');
-const file_reader = require('fs');
-const path_tool = require('path');
-const net = require('net');
+const file_reader   = require('fs');
+const path_tool     = require('path');
+const net           = require('net');
 
 // ─── Load Config ──────────────────────────────────────────────────────────────
 const setup_file_location = path_tool.join(process.cwd(), 'config.json');
@@ -9,7 +9,7 @@ let cfg;
 try {
   cfg = JSON.parse(file_reader.readFileSync(setup_file_location, 'utf8'));
 } catch (e) {
-  console.error("Failed to read config.json", e);
+  console.error('Failed to read config.json', e);
   process.exit(1);
 }
 
@@ -19,12 +19,12 @@ const dbg   = (msg)      => { if (DEBUG) log('DEBUG', msg); };
 
 // ─── 1. MQTT Forwarding Agent (LakeLedger TLS) ────────────────────────────────
 const mqtt_opts = {
-  username:        cfg.username,
-  password:        cfg.password,
+  username:           cfg.username,
+  password:           cfg.password,
   rejectUnauthorized: true,
-  clientId:        'lakeledger-bridge-' + Math.random().toString(16).slice(2, 8),
-  clean:           true,
-  reconnectPeriod: 5000,
+  clientId:           'lakeledger-bridge-' + Math.random().toString(16).slice(2, 8),
+  clean:              true,
+  reconnectPeriod:    5000,
 };
 
 const ca_path = path_tool.join(process.cwd(), '..', '2_TLS_Certificate', 'lakeledger-ca.crt');
@@ -36,110 +36,279 @@ const mqtt_client = mqtt_library.connect(cfg.remote_broker || 'mqtts://mqtt.getl
 mqtt_client.on('connect', () => log('MQTT',  'Securely connected to LakeLedger broker!'));
 mqtt_client.on('error',   (e) => log('ERROR', `LakeLedger MQTT issue: ${e.message}`));
 
-function publish_mqtt(payload_str) {
-  mqtt_client.publish(cfg.publish_topic, payload_str, { qos: 1 }, (err) => {
+function publish_mqtt(payload_str, topic_override) {
+  const topic = topic_override || cfg.publish_topic;
+  mqtt_client.publish(topic, payload_str, { qos: 1 }, (err) => {
     if (err) log('ERROR', `MQTT publish failed: ${err.message}`);
-    else     log('SUCCESS', `LakeLedger MQTT  <-  ${payload_str}`);
+    else     log('SUCCESS', `LakeLedger MQTT  ←  [${topic}]  ${payload_str}`);
   });
 }
 
-// ─── 2. Developer TCP Bridge Forwarder (134.122.14.249:8884, CSV) ─────────────
+// ─── 2. Developer TCP Bridge Forwarder (CSV) ──────────────────────────────────
 const dev_tcp_cfg = cfg.developer_tcp_bridge;
 
 function forward_csv_to_dev_bridge(do_val, temp_val, sat_val) {
-  if (!dev_tcp_cfg || !dev_tcp_cfg.enabled) {
-    dbg('Developer TCP bridge disabled in config. Skipping CSV forward.');
-    return;
-  }
-
+  if (!dev_tcp_cfg || !dev_tcp_cfg.enabled) return;
   const lake_id   = cfg.lake_id   || 'unknown_lake';
   const sensor_id = cfg.sensor_id || 'unknown_sensor';
   const csv_line  = `${lake_id},${sensor_id},${do_val},${temp_val},${sat_val}\n`;
-
   dbg(`Connecting to developer TCP bridge ${dev_tcp_cfg.host}:${dev_tcp_cfg.port} ...`);
   const dev_sock = new net.Socket();
   dev_sock.connect(dev_tcp_cfg.port, dev_tcp_cfg.host, () => {
     dev_sock.write(csv_line);
-    log('SUCCESS', `Developer TCP Bridge  <-  ${csv_line.trim()}`);
+    log('SUCCESS', `Developer TCP Bridge  ←  ${csv_line.trim()}`);
     dev_sock.destroy();
   });
-  dev_sock.on('error', (err) => log('ERROR', `Developer TCP bridge connection failed: ${err.message}`));
+  dev_sock.on('error', (err) => log('ERROR', `Developer TCP bridge failed: ${err.message}`));
 }
 
-// ─── 3. DTU Raw TCP Receiver (Port 3000) ──────────────────────────────────────
+// ─── 3. Packet Decoder ────────────────────────────────────────────────────────
+/**
+ * Classifies every raw packet the DTU sends and returns a structured result.
+ *
+ * Known packet types
+ * ──────────────────
+ *  HEARTBEAT   — single byte 0x30 or ASCII "0" / "Q"
+ *  MQTT_PUB    — raw MQTT PUBLISH frame: "PUB <topic> <payload>" or binary 0x30+length+topic
+ *  JSON        — packet that contains a {...} JSON object
+ *  MODBUS      — binary frame starting with a valid Modbus RTU signature
+ *  UNKNOWN     — anything else (still logged in full)
+ */
+function decode_packet(data) {
+  const raw_str   = data.toString('utf8');
+  const trimmed   = raw_str.trim();
+  const hex       = data.toString('hex');
+  const byte0     = data[0];
+
+  // ── HEARTBEAT ──────────────────────────────────────────────────────────────
+  // Single-byte 0x30 (ASCII "0"), single byte 0x51 ("Q"), or the literal string "0"
+  if (data.length <= 2 && (trimmed === '0' || trimmed === 'Q' || byte0 === 0x30)) {
+    return {
+      type:    'HEARTBEAT',
+      summary: `Heartbeat packet (raw: "${trimmed}", hex: ${hex})`,
+      forward: false,
+    };
+  }
+
+  // ── PLAIN TEXT "PUB <topic>" — some DTU firmware sends this ────────────────
+  if (trimmed.startsWith('PUB ')) {
+    const parts   = trimmed.slice(4).split(' '); // skip "PUB "
+    const topic   = parts[0] || '';
+    const payload = parts.slice(1).join(' ').trim();
+
+    // If there is no space after the topic the whole remainder IS the topic (login-only frame)
+    if (!payload) {
+      return {
+        type:    'MQTT_LOGIN',
+        summary: `DTU Topic Registration  →  Topic: "${topic}"`,
+        topic,
+        payload: null,
+        forward: false,  // login frame — nothing to forward yet
+      };
+    }
+
+    // There is a payload — try to parse it as JSON
+    let json_payload = null;
+    const json_start = payload.indexOf('{');
+    if (json_start !== -1) {
+      try { json_payload = JSON.parse(payload.slice(json_start)); } catch (_) {}
+    }
+
+    return {
+      type:         'MQTT_PUB',
+      summary:      `MQTT PUB  →  topic="${topic}"  payload="${payload}"`,
+      topic,
+      payload,
+      json_payload,
+      forward:      true,
+    };
+  }
+
+  // ── BINARY MQTT PUBLISH FRAME  (0x30 command byte + variable length) ────────
+  // Real MQTT PUBLISH: byte[0]=0x30, byte[1]=remaining_length, then topic_len(2 bytes)+topic+payload
+  if (byte0 === 0x30 && data.length > 4) {
+    try {
+      const remaining = data[1];           // remaining bytes after header
+      if (remaining === data.length - 2) { // sanity check
+        const topic_len = (data[2] << 8) | data[3];
+        const topic     = data.slice(4, 4 + topic_len).toString('utf8');
+        const payload   = data.slice(4 + topic_len).toString('utf8');
+
+        let json_payload = null;
+        try { json_payload = JSON.parse(payload); } catch (_) {}
+
+        return {
+          type:         'MQTT_BINARY_PUB',
+          summary:      `Binary MQTT PUB  →  topic="${topic}"  payload="${payload}"`,
+          topic,
+          payload,
+          json_payload,
+          forward:      true,
+        };
+      }
+    } catch (_) {}
+  }
+
+  // ── JSON somewhere in the packet ────────────────────────────────────────────
+  const json_start = trimmed.indexOf('{');
+  if (json_start !== -1) {
+    const json_str = trimmed.slice(json_start);
+    let parsed = null;
+    let parse_error = null;
+    try { parsed = JSON.parse(json_str); } catch (e) { parse_error = e.message; }
+
+    return {
+      type:        'JSON',
+      summary:     `JSON payload${parse_error ? ' (MALFORMED)' : ''}`,
+      raw_json:    json_str,
+      parsed,
+      parse_error,
+      forward:     true,
+    };
+  }
+
+  // ── MODBUS RTU heuristic — first byte = device address (1-247), second = function code ──
+  if (data.length >= 4 && byte0 >= 1 && byte0 <= 247) {
+    const func_code = data[1];
+    const KNOWN_FC  = [1, 2, 3, 4, 5, 6, 15, 16];
+    if (KNOWN_FC.includes(func_code)) {
+      const reg_hi = data[2], reg_lo = data[3];
+      const reg    = (reg_hi << 8) | reg_lo;
+      return {
+        type:    'MODBUS',
+        summary: `Modbus RTU  →  device=${byte0}  fc=${func_code}  reg=0x${reg.toString(16).toUpperCase().padStart(4,'0')}  (${data.length} bytes)`,
+        hex,
+        forward: false,   // we don't know how to parse DO/Temp from this yet
+        hint:    'Enable Modbus decoding in config.json to forward Modbus frames.',
+      };
+    }
+  }
+
+  // ── UNKNOWN ─────────────────────────────────────────────────────────────────
+  return {
+    type:    'UNKNOWN',
+    summary: `Unrecognised packet  (${data.length} bytes, hex: ${hex.slice(0, 60)}${hex.length > 60 ? '...' : ''})`,
+    forward: false,
+  };
+}
+
+// ─── 4. DTU Raw TCP Receiver (Port 3000) ──────────────────────────────────────
 const open_port = cfg.local_http_port || 3000;
 
 const tcp_server = net.createServer((socket) => {
-  dbg(`New DTU connection from [${socket.remoteAddress}]`);
+  log('INFO', `New DTU connection from [${socket.remoteAddress}]`);
   let has_data = false;
 
   socket.on('data', (data) => {
     try {
       has_data = true;
-      const raw_str = data.toString('utf8').trim();
 
-      // Block ALL HTTP traffic and attack probes — DTU never sends HTTP
+      // ── Quick security filter — DTU never sends HTTP ──
+      const raw_str = data.toString('utf8').trim();
       const HTTP_VERBS = ['GET ', 'POST ', 'PUT ', 'DELETE ', 'HEAD ', 'OPTIONS ', 'PATCH '];
-      const is_http = HTTP_VERBS.some(v => raw_str.startsWith(v));
-      if (is_http || raw_str.includes('HTTP/') || raw_str.includes('jsonrpc') || raw_str.includes('winnt')) {
-        dbg(`[SECURITY] Blocked HTTP/attack probe from [${socket.remoteAddress}]: ${raw_str.substring(0, 60)}...`);
-        socket.destroy(); // Don't even respond — starve the scanner
+      if (HTTP_VERBS.some(v => raw_str.startsWith(v)) ||
+          raw_str.includes('HTTP/') ||
+          raw_str.includes('jsonrpc') ||
+          raw_str.includes('winnt')) {
+        dbg(`[SECURITY] Blocked HTTP probe from [${socket.remoteAddress}]`);
+        socket.destroy();
         return;
       }
 
-      // ── ALWAYS log every packet's content ──
+      // ── Always log raw bytes ──
       log('DATA', `[${socket.remoteAddress}] Raw string : ${raw_str}`);
       log('DATA', `[${socket.remoteAddress}] HEX packet : ${data.toString('hex')}`);
       log('DATA', `[${socket.remoteAddress}] Byte count : ${data.length}`);
 
-      // ── Try to extract JSON ──
-      const json_start = raw_str.indexOf('{');
-      if (json_start !== -1) {
-        const json_str = raw_str.substring(json_start);
-        let parsed;
+      // ── Decode ──
+      const pkt = decode_packet(data);
+      log('DECODE', `TYPE=${pkt.type}  |  ${pkt.summary}`);
 
-        try {
-          parsed = JSON.parse(json_str);
-        } catch (e) {
-          log('WARN', `JSON parse failed — forwarding raw JSON string as-is to MQTT.`);
-          log('DATA', `[PAYLOAD TO MQTT] ${json_str}`);
-          publish_mqtt(json_str);
-          return;
-        }
+      if (pkt.hint) {
+        log('HINT', pkt.hint);
+      }
 
-        const readings = parsed.sensorDatas || parsed.sensorData || [];
-        let do_val   = 0;
-        let temp_val = 0;
-        let sat_val  = '';
-        let mqtt_payload;
+      // ── Handle each type ──
+      switch (pkt.type) {
 
-        if (readings.length >= 1) {
-          do_val   = parseFloat(readings[0].value || 0);
-          temp_val = readings.length > 1 ? parseFloat(readings[1].value || 0) : 0.0;
-          sat_val  = readings.length > 2 ? parseFloat(readings[2].value || 0) : '';
-          mqtt_payload = JSON.stringify({ dissolved_oxygen: do_val, water_temp: temp_val });
-        } else {
-          mqtt_payload = JSON.stringify(parsed);
-        }
+        case 'HEARTBEAT':
+          log('INFO', 'Heartbeat received — DTU is alive. No data to forward.');
+          break;
 
-        // Forward to both destinations — show payload on terminal
-        log('DATA', `[PARSED] DO=${do_val} | Temp=${temp_val} | Sat=${sat_val}`);
-        log('DATA', `[PAYLOAD TO MQTT] ${mqtt_payload}`);
-        publish_mqtt(mqtt_payload);
-        forward_csv_to_dev_bridge(do_val, temp_val, sat_val);
+        case 'MQTT_LOGIN':
+          log('INFO', `DTU registered topic: "${pkt.topic}" — waiting for data packets.`);
+          break;
 
-      } else {
-        // No JSON — handle raw/heartbeat packets
-        log('DATA', `[NO JSON] Raw packet content: "${raw_str}"`);
-        if (cfg.forward_all_raw_data && raw_str.length > 0) {
-          log('DATA', `[FORWARDING RAW] Sending raw payload to MQTT and Dev Bridge`);
-          publish_mqtt(raw_str);
-          if (dev_tcp_cfg && dev_tcp_cfg.enabled) {
-            forward_csv_to_dev_bridge(raw_str, '', '');
+        case 'MQTT_PUB':
+        case 'MQTT_BINARY_PUB':
+          if (pkt.json_payload) {
+            // We got structured data — extract sensor readings
+            const parsed  = pkt.json_payload;
+            const readings = parsed.sensorDatas || parsed.sensorData || [];
+            let do_val   = 0, temp_val = 0, sat_val = '';
+            let mqtt_payload;
+
+            if (readings.length >= 1) {
+              do_val   = parseFloat(readings[0].value || 0);
+              temp_val = readings.length > 1 ? parseFloat(readings[1].value || 0) : 0.0;
+              sat_val  = readings.length > 2 ? parseFloat(readings[2].value || 0) : '';
+              mqtt_payload = JSON.stringify({ dissolved_oxygen: do_val, water_temp: temp_val });
+            } else {
+              mqtt_payload = JSON.stringify(parsed);
+            }
+
+            log('DATA', `[PARSED] DO=${do_val} | Temp=${temp_val} | Sat=${sat_val}`);
+            publish_mqtt(mqtt_payload, pkt.topic || cfg.publish_topic);
+            forward_csv_to_dev_bridge(do_val, temp_val, sat_val);
+          } else {
+            // Forward the raw payload string — it may be plain sensor values
+            log('DATA', `[MQTT PUB, no JSON] Forwarding raw payload: "${pkt.payload}"`);
+            publish_mqtt(pkt.payload, pkt.topic || cfg.publish_topic);
           }
-        } else {
-          log('DATA', `[NOT FORWARDED] forward_all_raw_data is false — packet logged but not sent`);
+          break;
+
+        case 'JSON': {
+          const parsed  = pkt.parsed;
+          const readings = parsed ? (parsed.sensorDatas || parsed.sensorData || []) : [];
+          let do_val   = 0, temp_val = 0, sat_val = '';
+          let mqtt_payload;
+
+          if (pkt.parse_error) {
+            log('WARN', `JSON malformed (${pkt.parse_error}) — forwarding raw string.`);
+            publish_mqtt(pkt.raw_json);
+            break;
+          }
+
+          if (readings.length >= 1) {
+            do_val   = parseFloat(readings[0].value || 0);
+            temp_val = readings.length > 1 ? parseFloat(readings[1].value || 0) : 0.0;
+            sat_val  = readings.length > 2 ? parseFloat(readings[2].value || 0) : '';
+            mqtt_payload = JSON.stringify({ dissolved_oxygen: do_val, water_temp: temp_val });
+          } else {
+            mqtt_payload = JSON.stringify(parsed);
+          }
+
+          log('DATA', `[PARSED] DO=${do_val} | Temp=${temp_val} | Sat=${sat_val}`);
+          publish_mqtt(mqtt_payload);
+          forward_csv_to_dev_bridge(do_val, temp_val, sat_val);
+          break;
         }
+
+        case 'MODBUS':
+          log('WARN', `Modbus frame received but Modbus decoding is not yet enabled.`);
+          log('HINT', `Check config.json for a future "modbus_decoding" option, or contact support.`);
+          break;
+
+        case 'UNKNOWN':
+        default:
+          log('WARN', `Unknown packet — cannot forward. Full hex: ${data.toString('hex')}`);
+          if (cfg.forward_all_raw_data && raw_str.length > 0) {
+            log('DATA', `[FORWARDING RAW] forward_all_raw_data=true — sending as-is.`);
+            publish_mqtt(raw_str);
+          } else {
+            log('DATA', `[NOT FORWARDED] Set forward_all_raw_data=true in config to force-forward unknowns.`);
+          }
+          break;
       }
 
     } catch (e) {
