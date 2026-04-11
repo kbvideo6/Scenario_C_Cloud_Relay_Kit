@@ -2,6 +2,7 @@ const mqtt_library = require('mqtt');
 const file_reader   = require('fs');
 const path_tool     = require('path');
 const net           = require('net');
+const os            = require('os');
 
 // ─── Load Config ──────────────────────────────────────────────────────────────
 const setup_file_location = path_tool.join(process.cwd(), 'config.json');
@@ -14,8 +15,51 @@ try {
 }
 
 const DEBUG = cfg.debug_logging === true;
-const log   = (tag, msg) => console.log(`[${tag}] ${msg}`);
-const dbg   = (msg)      => { if (DEBUG) log('DEBUG', msg); };
+
+// ─── Session Log File ─────────────────────────────────────────────────────────
+// One .txt file per run, saved to ./logs/  — safe to delete anytime.
+const log_dir = path_tool.join(process.cwd(), 'logs');
+if (!file_reader.existsSync(log_dir)) file_reader.mkdirSync(log_dir, { recursive: true });
+
+const session_start   = new Date();
+const session_stamp   = session_start.toISOString().replace(/[:.]/g, '-').slice(0, 19); // YYYY-MM-DDTHH-MM-SS
+const log_file_path   = path_tool.join(log_dir, `bridge_log_${session_stamp}.txt`);
+const log_file_stream = file_reader.createWriteStream(log_file_path, { flags: 'a' });
+
+// Write a line to both console and the session log file
+function write_log_line(line) {
+  console.log(line);
+  log_file_stream.write(line + os.EOL);
+}
+
+// Tagged log — mirrors what we had before, but also goes to file
+const log = (tag, msg) => write_log_line(`[${tag}] ${msg}`);
+const dbg = (msg)      => { if (DEBUG) log('DEBUG', msg); };
+
+// Called once on startup
+write_log_line('═'.repeat(60));
+write_log_line(`  Bridge Session Started : ${session_start.toISOString()}`);
+write_log_line(`  Log file              : ${log_file_path}`);
+write_log_line(`  Hostname              : ${os.hostname()}`);
+write_log_line('═'.repeat(60));
+
+/**
+ * file_log(direction, label, lines)
+ * Writes a clearly-formatted block to the log for:
+ *   RECEIVED  — raw data coming in from DTU
+ *   SENT      — payload dispatched to MQTT or dev-bridge
+ *
+ * @param {'RECEIVED'|'SENT'|'EVENT'} direction
+ * @param {string}   label  Short description (e.g. "DTU 102.176.129.40")
+ * @param {string[]} lines  Array of detail lines
+ */
+function file_log(direction, label, lines) {
+  const ts     = new Date().toISOString();
+  const header = `┌─[${direction}]─ ${label} ─ ${ts}`;
+  const body   = lines.map(l => `│  ${l}`).join(os.EOL);
+  const footer = '└' + '─'.repeat(58);
+  log_file_stream.write([header, body, footer, ''].join(os.EOL));
+}
 
 // ─── 1. MQTT Forwarding Agent (LakeLedger TLS) ────────────────────────────────
 const mqtt_opts = {
@@ -39,8 +83,20 @@ mqtt_client.on('error',   (e) => log('ERROR', `LakeLedger MQTT issue: ${e.messag
 function publish_mqtt(payload_str, topic_override) {
   const topic = topic_override || cfg.publish_topic;
   mqtt_client.publish(topic, payload_str, { qos: 1 }, (err) => {
-    if (err) log('ERROR', `MQTT publish failed: ${err.message}`);
-    else     log('SUCCESS', `LakeLedger MQTT  ←  [${topic}]  ${payload_str}`);
+    if (err) {
+      log('ERROR', `MQTT publish failed: ${err.message}`);
+      file_log('SENT', 'MQTT — FAILED', [
+        `Topic   : ${topic}`,
+        `Payload : ${payload_str}`,
+        `Error   : ${err.message}`,
+      ]);
+    } else {
+      log('SUCCESS', `LakeLedger MQTT  ←  [${topic}]  ${payload_str}`);
+      file_log('SENT', 'MQTT — LakeLedger', [
+        `Topic   : ${topic}`,
+        `Payload : ${payload_str}`,
+      ]);
+    }
   });
 }
 
@@ -57,9 +113,15 @@ function forward_csv_to_dev_bridge(do_val, temp_val, sat_val) {
   dev_sock.connect(dev_tcp_cfg.port, dev_tcp_cfg.host, () => {
     dev_sock.write(csv_line);
     log('SUCCESS', `Developer TCP Bridge  ←  ${csv_line.trim()}`);
+    file_log('SENT', `Dev Bridge ${dev_tcp_cfg.host}:${dev_tcp_cfg.port}`, [
+      `CSV     : ${csv_line.trim()}`,
+    ]);
     dev_sock.destroy();
   });
-  dev_sock.on('error', (err) => log('ERROR', `Developer TCP bridge failed: ${err.message}`));
+  dev_sock.on('error', (err) => {
+    log('ERROR', `Developer TCP bridge failed: ${err.message}`);
+    file_log('SENT', 'Dev Bridge — FAILED', [`Error: ${err.message}`]);
+  });
 }
 
 // ─── 3. Packet Decoder ────────────────────────────────────────────────────────
@@ -215,10 +277,16 @@ const tcp_server = net.createServer((socket) => {
         return;
       }
 
-      // ── Always log raw bytes ──
+      // ── Always log raw bytes (console + file) ──
       log('DATA', `[${socket.remoteAddress}] Raw string : ${raw_str}`);
       log('DATA', `[${socket.remoteAddress}] HEX packet : ${data.toString('hex')}`);
       log('DATA', `[${socket.remoteAddress}] Byte count : ${data.length}`);
+
+      file_log('RECEIVED', `DTU ${socket.remoteAddress}`, [
+        `Bytes  : ${data.length}`,
+        `Text   : ${raw_str.length > 200 ? raw_str.slice(0, 200) + '…' : raw_str}`,
+        `HEX    : ${data.toString('hex').slice(0, 120)}${data.length > 60 ? '…' : ''}`,
+      ]);
 
       // ── Decode ──
       const pkt = decode_packet(data);
