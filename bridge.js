@@ -14,22 +14,31 @@ try {
   process.exit(1);
 }
 
-const DEBUG = cfg.debug_logging === true;
+const DEBUG         = cfg.debug_logging === true;
+const WRITE_TO_FILE = cfg.write_logs_to_file !== false;
 
 // ─── Session Log File ─────────────────────────────────────────────────────────
-// One .txt file per run, saved to ./logs/  — safe to delete anytime.
-const log_dir = path_tool.join(process.cwd(), 'logs');
-if (!file_reader.existsSync(log_dir)) file_reader.mkdirSync(log_dir, { recursive: true });
+let log_file_stream = null;
+let log_file_path   = null;
 
-const session_start   = new Date();
-const session_stamp   = session_start.toISOString().replace(/[:.]/g, '-').slice(0, 19); // YYYY-MM-DDTHH-MM-SS
-const log_file_path   = path_tool.join(log_dir, `bridge_log_${session_stamp}.txt`);
-const log_file_stream = file_reader.createWriteStream(log_file_path, { flags: 'a' });
+if (WRITE_TO_FILE) {
+  const log_dir = path_tool.join(process.cwd(), 'logs');
+  if (!file_reader.existsSync(log_dir)) file_reader.mkdirSync(log_dir, { recursive: true });
 
-// Write a line to both console and the session log file
+  const session_start   = new Date();
+  const session_stamp   = session_start.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  log_file_path   = path_tool.join(log_dir, `bridge_log_${session_stamp}.txt`);
+  log_file_stream = file_reader.createWriteStream(log_file_path, { flags: 'a' });
+}
+
+const session_start = new Date();
+
+// Write a line to both console and the session log file (if enabled)
 function write_log_line(line) {
   console.log(line);
-  log_file_stream.write(line + os.EOL);
+  if (WRITE_TO_FILE && log_file_stream) {
+    log_file_stream.write(line + os.EOL);
+  }
 }
 
 // Tagged log — mirrors what we had before, but also goes to file
@@ -39,7 +48,11 @@ const dbg = (msg)      => { if (DEBUG) log('DEBUG', msg); };
 // Called once on startup
 write_log_line('═'.repeat(60));
 write_log_line(`  Bridge Session Started : ${session_start.toISOString()}`);
-write_log_line(`  Log file              : ${log_file_path}`);
+if (WRITE_TO_FILE) {
+  write_log_line(`  Log file              : ${log_file_path}`);
+} else {
+  write_log_line(`  Log file              : DISABLED`);
+}
 write_log_line(`  Hostname              : ${os.hostname()}`);
 write_log_line('═'.repeat(60));
 
@@ -54,6 +67,7 @@ write_log_line('═'.repeat(60));
  * @param {string[]} lines  Array of detail lines
  */
 function file_log(direction, label, lines) {
+  if (!WRITE_TO_FILE || !log_file_stream) return;
   const ts     = new Date().toISOString();
   const header = `┌─[${direction}]─ ${label} ─ ${ts}`;
   const body   = lines.map(l => `│  ${l}`).join(os.EOL);
