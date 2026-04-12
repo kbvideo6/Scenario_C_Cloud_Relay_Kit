@@ -33,7 +33,7 @@ Open your computer's terminal (Command Prompt, PowerShell, or Mac Terminal) and 
 # Example syntax (note: the default user is 'ubuntu')
 ssh -i "C:\Users\artst\Downloads\ssh-key-2026-04-10.key" ubuntu@150.136.62.31
 ```
-scp ubuntu@150.136.62.31:/home/ubuntu/Scenario_C_Cloud_Relay_Kit/logs/bridge_log_2026-04-11T07-07-57.txt .
+scp -i "C:\Users\artst\Downloads\ssh-key-2026-04-10.key" ubuntu@150.136.62.31:/home/ubuntu/Scenario_C_Cloud_Relay_Kit/logs/bridge_log_2026-04-11T07-07-57.txt .
 
 
 ### 4. Open the Internal Linux Firewall
