@@ -95,7 +95,9 @@ mqtt_client.on('connect', () => log('MQTT',  'Securely connected to LakeLedger b
 mqtt_client.on('error',   (e) => log('ERROR', `LakeLedger MQTT issue: ${e.message}`));
 
 function publish_mqtt(payload_str, topic_override) {
-  const topic = topic_override || cfg.publish_topic;
+  const raw_topic = topic_override || cfg.publish_topic;
+  // Strip "PUB " prefix that the DTU may embed in MQTT mode topics
+  const topic = raw_topic.startsWith('PUB ') ? raw_topic.slice(4).trim() : raw_topic;
   mqtt_client.publish(topic, payload_str, { qos: 1 }, (err) => {
     if (err) {
       log('ERROR', `MQTT publish failed: ${err.message}`);
@@ -546,12 +548,26 @@ function decode_packet(data) {
   };
 }
 
+// ─── Topic sanitisation ─────────────────────────────────────────────────────
+/**
+ * The DTU in MQTT mode uses the "Link 1 login package" string as its MQTT topic.
+ * That field often contains a "PUB " prefix left over from transparent mode.
+ * Strip it so the actual forwarded topic is clean (e.g. "lake/…/data" not "PUB lake/…/data").
+ */
+function sanitize_topic(raw_topic) {
+  if (!raw_topic) return raw_topic;
+  let t = raw_topic.trim();
+  if (t.startsWith('PUB ')) t = t.slice(4).trim();
+  return t;
+}
+
 // ─── Sensor data extraction helper ──────────────────────────────────────────
 /**
  * Given a parsed JSON payload (from either MQTT mode or transparent mode),
  * extract sensor readings and forward to LakeLedger + developer bridge.
  */
 function extract_and_forward(parsed_json, topic_override) {
+  topic_override = sanitize_topic(topic_override);
   const readings = parsed_json.sensorDatas || parsed_json.sensorData || [];
   let do_val   = 0, temp_val = 0, sat_val = '';
   let mqtt_payload;
